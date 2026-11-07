@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+data/inbox/*
+data/errors/*
+!data/inbox/.gitkeep
+!data/errors/.gitkeep

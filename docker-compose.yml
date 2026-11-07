@@ -1,0 +1,173 @@
+name: seclog
+
+services:
+  # ---------- Elasticsearch ----------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELK_VERSION:-8.15.3}
+    container_name: seclog-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false        # développement uniquement
+      - ES_JAVA_OPTS=-Xms${ES_HEAP:-1g} -Xmx${ES_HEAP:-1g}
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks: [elk-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -Eq '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------- Création de l'index template (one-shot) ----------
+  es-init:
+    image: curlimages/curl:8.10.1
+    container_name: seclog-es-init
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./elasticsearch/templates:/templates:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        curl -sf -X PUT http://elasticsearch:9200/_index_template/logs-security
+        -H 'Content-Type: application/json' -d @/templates/logs-security.json
+        && echo ' -> index template logs-security OK'
+    networks: [elk-net]
+    restart: "no"
+
+  # ---------- Logstash ----------
+  logstash:
+    image: docker.elastic.co/logstash/logstash:${ELK_VERSION:-8.15.3}
+    container_name: seclog-logstash
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      es-init:
+        condition: service_completed_successfully
+    environment:
+      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+      - XPACK_MONITORING_ENABLED=false
+    ports:
+      - "9600:9600"
+    volumes:
+      - ./logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./data/inbox:/data/inbox:ro
+      - ./data/errors:/data/errors
+      - logstashdata:/usr/share/logstash/data
+    networks: [elk-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9600 > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---------- Kibana ----------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELK_VERSION:-8.15.3}
+    container_name: seclog-kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks: [elk-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---------- MongoDB ----------
+  mongodb:
+    image: mongo:7
+    container_name: seclog-mongodb
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    networks: [elk-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ---------- Redis ----------
+  redis:
+    image: redis:7-alpine
+    container_name: seclog-redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    environment:
+      - REDISCLI_AUTH=${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks: [elk-net]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------- Application web Flask ----------
+  webapp:
+    build:
+      context: ./webapp
+    container_name: seclog-webapp
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - MONGO_URI=mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongodb:27017/?authSource=admin
+      - MONGO_DB=${MONGO_DB:-seclog}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-100}
+      - INBOX_DIR=/data/inbox
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/inbox:/data/inbox
+    networks: [elk-net]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+networks:
+  elk-net:
+    driver: bridge
+
+volumes:
+  esdata:
+  logstashdata:
+  mongodata:
+  redisdata:
