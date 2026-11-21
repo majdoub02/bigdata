@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 .idea/
 .vscode/
+.pytest_cache/
+.coverage
+htmlcov/
+samples/
 data/inbox/*
 data/errors/*
 !data/inbox/.gitkeep

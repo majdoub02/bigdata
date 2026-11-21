@@ -10,12 +10,16 @@ from pymongo import MongoClient
 
 @lru_cache(maxsize=1)
 def es_client():
-    return Elasticsearch(os.environ["ES_URL"], request_timeout=3, max_retries=0)
+    return Elasticsearch(os.environ["ES_URL"], request_timeout=5, max_retries=0)
 
 
 @lru_cache(maxsize=1)
 def mongo_client():
-    return MongoClient(os.environ["MONGO_URI"], serverSelectionTimeoutMS=3000)
+    return MongoClient(os.environ["MONGO_URI"], serverSelectionTimeoutMS=3000, tz_aware=True)
+
+
+def mongo_db():
+    return mongo_client()[os.getenv("MONGO_DB", "seclog")]
 
 
 @lru_cache(maxsize=1)
